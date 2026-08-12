@@ -1,5 +1,4 @@
-```yaml
-name: Deploy static content to Pages
+name: Deploy static website to GitHub Pages
 
 on:
   push:
@@ -17,11 +16,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: github-pages
+  cancel-in-progress: true
 
 jobs:
   deploy:
+    name: Deploy website
     runs-on: ubuntu-latest
 
     environment:
@@ -32,15 +32,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Pages
+      - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload Pages artifact
+      - name: Upload website
         uses: actions/upload-pages-artifact@v4
         with:
           path: "./docs"
 
-      - name: Deploy to GitHub Pages
+      - name: Deploy website
         id: deployment
         uses: actions/deploy-pages@v5
-```
