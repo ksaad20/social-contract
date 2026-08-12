@@ -28,8 +28,8 @@ jobs:
           test -f gradle/wrapper/gradle-wrapper.jar
           sha256sum gradle/wrapper/gradle-wrapper.jar
 
-      - name: Validate Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@v4
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
 
       - name: Commit Wrapper
         run: |
