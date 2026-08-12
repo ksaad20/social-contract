@@ -225,3 +225,42 @@ social-contract-android/
     └── workflows/
         ├── android-ci.yml
         └── release.yml
+```
+Expense Model
+
+```
+Expense
+├── id
+├── contractId
+├── category
+├── description
+├── amount
+├── currency
+├── date
+├── paidBy
+├── deductible
+└── evidenceId
+
+```
+Categories 
+
+```
+LABOR
+SEED
+FERTILIZER
+PESTICIDE
+HERBICIDE
+IRRIGATION
+LAND_PREPARATION
+MACHINERY
+FUEL
+ELECTRICITY
+TRANSPORTATION
+COMMUNICATION
+HARVESTING
+STORAGE
+PACKAGING
+MARKET_FEES
+RENTAL
+REPAIRS
+OTHER
