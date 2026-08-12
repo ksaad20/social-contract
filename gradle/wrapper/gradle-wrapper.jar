@@ -14,32 +14,85 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Gradle 8.13
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
 
       - name: Generate Gradle Wrapper
         run: |
-          gradle wrapper --gradle-version 8.13
+          gradle wrapper --gradle-version 8.13 --distribution-type bin
 
-      - name: Verify Wrapper JAR
+      - name: Replace with official Gradle 8.13 Wrapper JAR
+        shell: bash
         run: |
+          set -euo pipefail
+
+          mkdir -p gradle/wrapper
+
+          curl --fail --location \
+            --retry 5 \
+            --retry-delay 2 \
+            --output gradle/wrapper/gradle-wrapper.jar \
+            https://services.gradle.org/distributions/gradle-8.13-wrapper.jar
+
+      - name: Verify official Gradle 8.13 Wrapper JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="REPLACE_WITH_OFFICIAL_GRADLE_8_13_WRAPPER_SHA256"
+          ACTUAL="$(sha256sum gradle/wrapper/gradle-wrapper.jar | cut -d' ' -f1)"
+
+          echo "Expected SHA-256: ${EXPECTED}"
+          echo "Actual SHA-256:   ${ACTUAL}"
+
+          test "${ACTUAL}" = "${EXPECTED}"
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Verify wrapper files
+        shell: bash
+        run: |
+          set -euo pipefail
+
           test -f gradle/wrapper/gradle-wrapper.jar
-          sha256sum gradle/wrapper/gradle-wrapper.jar
+          test -f gradle/wrapper/gradle-wrapper.properties
+          test -f gradlew
+          test -f gradlew.bat
+
+          chmod +x gradlew
+
+          ./gradlew --version
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --no-daemon
 
       - name: Commit Wrapper
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
-          git config user.email "RDYCCBQ3Z30C78FQ-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add gradle/wrapper/gradle-wrapper.jar
           git add gradle/wrapper/gradle-wrapper.properties
           git add gradlew
           git add gradlew.bat
 
-          git diff --cached --quiet || git commit -m "Add Gradle 8.13 Wrapper"
+          if git diff --cached --quiet; then
+            echo "No wrapper changes to commit."
+            exit 0
+          fi
+
+          git commit -m "build: add verified Gradle 8.13 wrapper"
           git push
