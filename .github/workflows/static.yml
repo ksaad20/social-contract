@@ -1,9 +1,14 @@
+```yaml
 name: Deploy static content to Pages
 
 on:
   push:
     branches:
       - main
+    paths:
+      - "docs/**"
+      - ".github/workflows/static.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -16,9 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build and upload Pages artifact
+  deploy:
     runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout
@@ -30,18 +38,8 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: .
+          path: "./docs"
 
-  deploy:
-    name: Deploy Pages artifact
-    needs: build
-    runs-on: ubuntu-latest
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
