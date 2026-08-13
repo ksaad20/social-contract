@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build CropShare Debug APK
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_API: "35"
+      BUILD_TOOLS: "35.0.0"
 
     steps:
       - name: Checkout
@@ -27,153 +31,184 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
+      - name: Install Android SDK
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           sdkmanager "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${BUILD_TOOLS}"
 
-      - name: Set up Gradle
+      - name: Remove obsolete manual build files
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # The project must not use the previous Maven/manual APK builder.
+          rm -rf native-build
+
+          echo "Checking workflows for obsolete Maven/native-build references..."
+
+          if grep -RniE \
+            'dependency:copy-dependencies|cd native-build|native-build/pom.xml|mvn -B|Install Maven|Create native dependency descriptor' \
+            .github/workflows \
+            --exclude="$(basename "${GITHUB_WORKFLOW}")" 2>/dev/null; then
+
+            echo "::error::An obsolete Maven/native-build workflow still exists."
+            echo "::error::Delete that old workflow from .github/workflows."
+            exit 1
+          fi
+
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.13"
           validate-wrappers: false
 
-      - name: Verify project structure
+      - name: Verify Gradle
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          echo "Project root:"
-          pwd
+          gradle --version
 
-          echo
-          echo "Gradle files:"
-          find . -maxdepth 3 \
-            -type f \
-            \( \
-              -name "settings.gradle" \
-              -o -name "settings.gradle.kts" \
-              -o -name "build.gradle" \
-              -o -name "build.gradle.kts" \
-              -o -name "gradle.properties" \
-            \) \
-            -print | sort
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          echo
-          echo "Kotlin sources:"
+          test -f settings.gradle.kts || \
+          test -f settings.gradle
+
+          test -f build.gradle.kts || \
+          test -f build.gradle
+
+          test -f app/build.gradle.kts || \
+          test -f app/build.gradle
+
+          test -f app/src/main/AndroidManifest.xml
+
+          echo "Android project detected."
+
+      - name: Verify Kotlin sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+
           find app/src/main \
             -type f \
-            \( -name "*.kt" -o -name "*.kts" \) \
-            -print | sort
+            -name "*.kt" \
+            -print
 
-          echo
-          echo "Manifest:"
-          test -f app/src/main/AndroidManifest.xml
-          sed -n '1,160p' app/src/main/AndroidManifest.xml
+          test -n "$(
+            find app/src/main \
+              -type f \
+              -name "*.kt" \
+              -print \
+              -quit
+          )"
 
-      - name: Verify Android namespace
+      - name: Verify namespace
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          test -f app/build.gradle.kts || {
-            echo "::error::app/build.gradle.kts was not found."
-            exit 1
-          }
+          BUILD_FILE=""
 
-          echo "Android namespace configuration:"
-          grep -n "namespace" app/build.gradle.kts || true
+          if [ -f app/build.gradle.kts ]; then
+            BUILD_FILE="app/build.gradle.kts"
+          elif [ -f app/build.gradle ]; then
+            BUILD_FILE="app/build.gradle"
+          fi
 
-          if ! grep -q 'namespace[[:space:]]*=' app/build.gradle.kts; then
-            echo "::error::The Android namespace is missing from app/build.gradle.kts."
-            echo "Add:"
-            echo 'namespace = "com.example.socialcontract"'
+          test -n "${BUILD_FILE}"
+
+          echo "Using ${BUILD_FILE}"
+
+          grep -n "namespace" "${BUILD_FILE}"
+
+          if ! grep -Eq \
+            'namespace[[:space:]]*=[[:space:]]*"com\.(example\.)?socialcontract(\.cropshare)?"' \
+            "${BUILD_FILE}"; then
+
+            echo "::error::Expected CropShare Android namespace was not found."
             exit 1
           fi
 
-      - name: Verify manifest has no package attribute
+      - name: Verify manifest
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           MANIFEST="app/src/main/AndroidManifest.xml"
 
-          if grep -Eq '<manifest[^>]*[[:space:]]package[[:space:]]*=' "$MANIFEST"; then
-            echo "::error::AndroidManifest.xml still contains a package attribute."
-            echo "With modern Android Gradle Plugin, namespace belongs in app/build.gradle.kts."
+          echo "Manifest:"
+          cat "${MANIFEST}"
+
+          # Modern Android Gradle Plugin uses namespace from
+          # app/build.gradle(.kts), not package= in AndroidManifest.xml.
+          if grep -Eq \
+            '<manifest[^>]*[[:space:]]package[[:space:]]*=' \
+            "${MANIFEST}"; then
+
+            echo "::error::AndroidManifest.xml contains package=."
+            echo "::error::Remove package= from the manifest."
+            echo "::error::Define namespace in app/build.gradle.kts instead."
             exit 1
           fi
 
-          echo "Manifest package attribute check passed."
-
-      - name: Verify Kotlin source layout
+      - name: Clean
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          test -d app/src/main
-
-          if ! find app/src/main \
-            -type f \
-            -name "*.kt" \
-            -print \
-            -quit | grep -q .; then
-            echo "::error::No Kotlin source files were found under app/src/main."
-            exit 1
-          fi
-
-          echo "Kotlin source files found:"
-          find app/src/main \
-            -type f \
-            -name "*.kt" \
-            -print | sort
-
-      - name: Clean previous build
-        run: |
-          set -euo pipefail
-
-          gradle clean --no-daemon
+          gradle clean --no-daemon --stacktrace
 
       - name: Build Debug APK
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          gradle :app:assembleDebug --no-daemon --stacktrace
+          gradle :app:assembleDebug \
+            --no-daemon \
+            --stacktrace
 
       - name: Locate APK
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          echo "Generated APK files:"
+          echo "APK files generated:"
 
           find app/build/outputs/apk \
             -type f \
             -name "*.apk" \
             -print
 
-          test -n "$(
-            find app/build/outputs/apk \
-              -type f \
-              -name "*.apk" \
-              -print \
-              -quit
-          )"
+          test -s \
+            app/build/outputs/apk/debug/app-debug.apk
 
       - name: Verify APK
+        shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
+          AAPT="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt"
 
-          test -f "$APK"
-          test -s "$APK"
+          test -f "${APK}"
+          test -s "${APK}"
 
-          echo "APK:"
-          ls -lh "$APK"
+          echo "APK size:"
+          ls -lh "${APK}"
 
           echo
-          echo "APK metadata:"
-          "${ANDROID_HOME}/build-tools/35.0.0/aapt" \
-            dump badging "$APK" | head -n 20
+          echo "APK manifest/package information:"
+
+          if [ -x "${AAPT}" ]; then
+            "${AAPT}" dump badging "${APK}" | head -n 25
+          fi
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
