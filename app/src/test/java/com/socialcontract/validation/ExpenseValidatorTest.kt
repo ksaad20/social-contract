@@ -1,4 +1,3 @@
-```kotlin id="9v5k1a"
 package com.socialcontract.android.validation
 
 import org.junit.Assert.assertFalse
@@ -156,5 +155,3 @@ class ExpenseValidatorTest {
         }
     }
 }
-```
-
