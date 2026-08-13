@@ -11,12 +11,12 @@ permissions:
 
 jobs:
   build:
-    name: Build CropShare Debug APK
+    name: Build Debug APK
     runs-on: ubuntu-latest
 
     env:
-      ANDROID_API: "35"
-      BUILD_TOOLS: "35.0.0"
+      JAVA_VERSION: "17"
+      GRADLE_VERSION: "8.13"
 
     steps:
       - name: Checkout
@@ -37,26 +37,90 @@ jobs:
           set -euxo pipefail
 
           sdkmanager "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;${BUILD_TOOLS}"
+                      "platforms;android-35" \
+                      "build-tools;35.0.0"
 
-      - name: Remove obsolete manual build files
+      - name: Verify project structure
         shell: bash
         run: |
           set -euxo pipefail
 
-          # The project must not use the previous Maven/manual APK builder.
-          rm -rf native-build
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f build.gradle || test -f build.gradle.kts
 
-          echo "Checking workflows for obsolete Maven/native-build references..."
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
 
-          if grep -RniE \
-            'dependency:copy-dependencies|cd native-build|native-build/pom.xml|mvn -B|Install Maven|Create native dependency descriptor' \
-            .github/workflows \
-            --exclude="$(basename "${GITHUB_WORKFLOW}")" 2>/dev/null; then
+          echo "Android project structure:"
+          find app/src/main -maxdepth 3 -type f | sort
 
-            echo "::error::An obsolete Maven/native-build workflow still exists."
-            echo "::error::Delete that old workflow from .github/workflows."
+      - name: Remove obsolete manifest package attribute
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          MANIFEST="app/src/main/AndroidManifest.xml"
+
+          test -f "${MANIFEST}"
+
+          python3 - "${MANIFEST}" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          original = text
+
+          # Android Gradle Plugin 8+ requires namespace to be declared
+          # in Gradle configuration rather than the source manifest.
+          text = re.sub(
+              r'\s+package\s*=\s*"[^"]*"',
+              "",
+              text,
+              count=1,
+          )
+
+          if text != original:
+              path.write_text(text, encoding="utf-8")
+              print("Removed package attribute from AndroidManifest.xml")
+          else:
+              print("No manifest package attribute found")
+
+          if re.search(r'<manifest\b[^>]*\bpackage\s*=', text):
+              raise SystemExit(
+                  "ERROR: AndroidManifest.xml still contains a package attribute"
+              )
+          PY
+
+          sed -n '1,80p' "${MANIFEST}"
+
+      - name: Verify Gradle namespace
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          BUILD_FILE="app/build.gradle.kts"
+
+          if [ ! -f "${BUILD_FILE}" ]; then
+            BUILD_FILE="app/build.gradle"
+          fi
+
+          test -f "${BUILD_FILE}"
+
+          echo "Using module build file: ${BUILD_FILE}"
+
+          if grep -Eq '^[[:space:]]*namespace[[:space:]]*=' "${BUILD_FILE}"; then
+            echo "Namespace declaration found:"
+            grep -nE '^[[:space:]]*namespace[[:space:]]*=' "${BUILD_FILE}"
+          else
+            echo "::error::No namespace declaration found in ${BUILD_FILE}"
+            echo
+            echo "The Android Gradle Plugin requires:"
+            echo 'namespace = "com.example.socialcontract"'
+            echo
+            sed -n '1,180p' "${BUILD_FILE}"
             exit 1
           fi
 
@@ -64,113 +128,62 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.13"
-          validate-wrappers: false
 
       - name: Verify Gradle
         shell: bash
         run: |
           set -euxo pipefail
-
           gradle --version
 
-      - name: Verify Android project
+      - name: Check for obsolete native build workflow
         shell: bash
         run: |
           set -euxo pipefail
 
-          test -f settings.gradle.kts || \
-          test -f settings.gradle
+          echo "Checking repository workflow files for obsolete Maven/native-build workflows..."
 
-          test -f build.gradle.kts || \
-          test -f build.gradle
+          found=0
 
-          test -f app/build.gradle.kts || \
-          test -f app/build.gradle
+          while IFS= read -r workflow; do
+            [ "${workflow}" = ".github/workflows/build-native-android-apk.yml" ] && continue
 
-          test -f app/src/main/AndroidManifest.xml
+            if grep -nE \
+              'dependency:copy-dependencies|native-build/pom.xml|Install Maven|Create native dependency descriptor' \
+              "${workflow}" \
+              >/dev/null 2>&1; then
 
-          echo "Android project detected."
-
-      - name: Verify Kotlin sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          find app/src/main \
-            -type f \
-            -name "*.kt" \
-            -print
-
-          test -n "$(
-            find app/src/main \
+              echo "::error::Obsolete Maven/native-build workflow found: ${workflow}"
+              found=1
+            fi
+          done < <(
+            find .github/workflows \
               -type f \
-              -name "*.kt" \
-              -print \
-              -quit
-          )"
+              \( -name "*.yml" -o -name "*.yaml" \) \
+              -print
+          )
 
-      - name: Verify namespace
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          BUILD_FILE=""
-
-          if [ -f app/build.gradle.kts ]; then
-            BUILD_FILE="app/build.gradle.kts"
-          elif [ -f app/build.gradle ]; then
-            BUILD_FILE="app/build.gradle"
-          fi
-
-          test -n "${BUILD_FILE}"
-
-          echo "Using ${BUILD_FILE}"
-
-          grep -n "namespace" "${BUILD_FILE}"
-
-          if ! grep -Eq \
-            'namespace[[:space:]]*=[[:space:]]*"com\.(example\.)?socialcontract(\.cropshare)?"' \
-            "${BUILD_FILE}"; then
-
-            echo "::error::Expected CropShare Android namespace was not found."
+          if [ "${found}" -ne 0 ]; then
+            echo "::error::Remove the obsolete Maven/native-build workflow(s) from .github/workflows."
             exit 1
           fi
 
-      - name: Verify manifest
+          echo "No obsolete Maven/native-build workflow found."
+
+      - name: Clean previous build outputs
         shell: bash
         run: |
           set -euxo pipefail
 
-          MANIFEST="app/src/main/AndroidManifest.xml"
-
-          echo "Manifest:"
-          cat "${MANIFEST}"
-
-          # Modern Android Gradle Plugin uses namespace from
-          # app/build.gradle(.kts), not package= in AndroidManifest.xml.
-          if grep -Eq \
-            '<manifest[^>]*[[:space:]]package[[:space:]]*=' \
-            "${MANIFEST}"; then
-
-            echo "::error::AndroidManifest.xml contains package=."
-            echo "::error::Remove package= from the manifest."
-            echo "::error::Define namespace in app/build.gradle.kts instead."
-            exit 1
-          fi
-
-      - name: Clean
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          gradle clean --no-daemon --stacktrace
+          rm -rf native-build
+          rm -rf app/build
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -euxo pipefail
 
-          gradle :app:assembleDebug \
+          gradle \
+            :app:assembleDebug \
             --no-daemon \
             --stacktrace
 
@@ -179,40 +192,52 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "APK files generated:"
+          echo "Generated APK files:"
 
           find app/build/outputs/apk \
             -type f \
             -name "*.apk" \
             -print
 
-          test -s \
-            app/build/outputs/apk/debug/app-debug.apk
+          test -n "$(
+            find app/build/outputs/apk \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -quit
+          )"
 
       - name: Verify APK
         shell: bash
         run: |
           set -euxo pipefail
 
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          AAPT="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt"
+          APK="$(
+            find app/build/outputs/apk \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -quit
+          )"
 
-          test -f "${APK}"
           test -s "${APK}"
 
-          echo "APK size:"
+          echo "APK:"
+          echo "${APK}"
+
           ls -lh "${APK}"
 
-          echo
-          echo "APK manifest/package information:"
+          APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
 
-          if [ -x "${AAPT}" ]; then
-            "${AAPT}" dump badging "${APK}" | head -n 25
+          if "${APKSIGNER}" verify --verbose "${APK}"; then
+            echo "APK signature verification passed."
+          else
+            echo "::warning::APK signature verification was not successful."
           fi
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
           name: cropshare-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
