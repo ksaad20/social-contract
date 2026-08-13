@@ -1,19 +1,18 @@
-name: Build Native APK
+name: Build Debug APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build APK Without Gradle
+    name: Build Debug APK
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_API: "35"
-      BUILD_TOOLS: "35.0.0"
 
     steps:
       - name: Checkout
@@ -24,212 +23,136 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.13"
+          validate-wrappers: false
 
-      - name: Install Android SDK components
-        run: |
-          sdkmanager "platforms;android-${ANDROID_API}" \
-                     "build-tools;${BUILD_TOOLS}"
-
-      - name: Locate Android SDK
+      - name: Verify toolchain
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          java -version
+          gradle --version
 
-          test -d "${ANDROID_HOME}/platforms/android-${ANDROID_API}"
-          test -d "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}"
-
-      - name: Prepare native build directories
+      - name: Verify Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf native-build
-
-          mkdir -p native-build
-          mkdir -p native-build/generated
-          mkdir -p native-build/compiled-res
-          mkdir -p native-build/classes
-          mkdir -p native-build/dex
-          mkdir -p native-build/apk
-
-      - name: Compile Android resources with AAPT2
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-
-          test -x "${AAPT2}"
-
-          if [ -d app/src/main/res ]; then
-            find app/src/main/res -type f -print0 | while IFS= read -r -d '' file; do
-              "${AAPT2}" compile \
-                --dir "$(dirname "${file}")" \
-                -o native-build/compiled-res
-              break
-            done
-          fi
-
-      - name: Compile resources individually
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-
-          rm -rf native-build/compiled-res
-          mkdir -p native-build/compiled-res
-
-          if [ -d app/src/main/res ]; then
-            find app/src/main/res -type f -print0 |
-            while IFS= read -r -d '' resource; do
-              echo "Compiling: ${resource}"
-
-              "${AAPT2}" compile \
-                --legacy \
-                -o native-build/compiled-res \
-                "${resource}"
-            done
-          fi
-
-      - name: Generate R.java and link resources
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
+          test -f settings.gradle.kts
+          test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
-          test -f "${ANDROID_JAR}"
 
-          "${AAPT2}" link \
-            -o native-build/resources.apk \
-            --manifest app/src/main/AndroidManifest.xml \
-            -I "${ANDROID_JAR}" \
-            --java native-build/generated \
-            --auto-add-overlay \
-            native-build/compiled-res/*.flat
+          echo "Project files:"
+          find app/src/main -maxdepth 3 -type f | sort
 
-      - name: Compile Java sources
+      - name: Verify Kotlin sources
         shell: bash
         run: |
           set -euo pipefail
 
-          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+          test -n "$(find app/src/main -type f -name '*.kt' -print -quit)"
 
-          find app/src/main/java native-build/generated \
+          echo "Production Kotlin sources:"
+          find app/src/main \
             -type f \
-            -name "*.java" \
-            > native-build/java-sources.txt
+            -name "*.kt" \
+            ! -name "*Test.kt" \
+            ! -name "*Test*.kt" \
+            -print \
+            | sort
 
-          if [ ! -s native-build/java-sources.txt ]; then
-            echo "::error::No Java source files were found."
+      - name: Verify manifest namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="app/src/main/AndroidManifest.xml"
+
+          if grep -qE '<manifest[^>]*[[:space:]]package=' "${MANIFEST}"; then
+            echo "::error::AndroidManifest.xml contains a package attribute."
+            echo "The namespace must be defined in app/build.gradle.kts."
             exit 1
           fi
 
-          javac \
-            -source 17 \
-            -target 17 \
-            -encoding UTF-8 \
-            -classpath "${ANDROID_JAR}" \
-            -d native-build/classes \
-            @native-build/java-sources.txt
+          echo "Manifest is compatible with modern Android Gradle Plugin."
 
-      - name: Convert Java bytecode to DEX
+      - name: Clean previous build
         shell: bash
         run: |
           set -euo pipefail
 
-          D8="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
+          gradle clean --no-daemon
 
-          test -x "${D8}"
-
-          "${D8}" \
-            --lib "${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar" \
-            --min-api 23 \
-            --output native-build/dex \
-            $(find native-build/classes -type f -name "*.class")
-
-      - name: Package APK
+      - name: Build Debug APK
         shell: bash
         run: |
           set -euo pipefail
 
-          cd native-build/apk
+          gradle \
+            :app:assembleDebug \
+            --no-daemon \
+            --stacktrace
 
-          unzip -q ../resources.apk
-
-          cp ../dex/classes.dex .
-
-          zip -q -r ../unsigned.apk .
-
-      - name: Align APK
+      - name: Locate APK
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIPALIGN="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
+          echo "Generated APK files:"
 
-          test -x "${ZIPALIGN}"
+          find app/build/outputs/apk \
+            -type f \
+            -name "*.apk" \
+            -print
 
-          "${ZIPALIGN}" \
-            -f 4 \
-            native-build/unsigned.apk \
-            native-build/aligned.apk
+          test -n "$(
+            find app/build/outputs/apk \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -quit
+          )"
 
-      - name: Create debug signing key
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
 
-          keytool \
-            -genkeypair \
-            -v \
-            -keystore native-build/debug.keystore \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          APK="$(
+            find app/build/outputs/apk \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -quit
+          )"
 
-      - name: Sign APK
-        shell: bash
-        run: |
-          set -euo pipefail
+          test -s "${APK}"
 
-          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+          echo "APK:"
+          ls -lh "${APK}"
+
+          SDK="${ANDROID_HOME}"
+          APKSIGNER="$(
+            find "${SDK}/build-tools" \
+              -type f \
+              -name apksigner \
+              | sort \
+              | tail -n 1
+          )"
 
           test -x "${APKSIGNER}"
 
-          "${APKSIGNER}" sign \
-            --ks native-build/debug.keystore \
-            --ks-pass pass:android \
-            --ks-key-alias androiddebugkey \
-            --key-pass pass:android \
-            --out native-build/app-debug.apk \
-            native-build/aligned.apk
-
-      - name: Verify APK signature
-        run: |
-          "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose native-build/app-debug.apk
-
-      - name: Inspect APK
-        run: |
-          ls -lh native-build/app-debug.apk
-          file native-build/app-debug.apk
+          "${APKSIGNER}" verify --verbose "${APK}"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
-          name: native-debug-apk
-          path: native-build/app-debug.apk
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
