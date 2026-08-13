@@ -11,8 +11,13 @@ permissions:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build Debug APK Without Gradle
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_API: "35"
+      BUILD_TOOLS: "35.0.0"
+      PACKAGE_NAME: "com.example.socialcontract"
 
     steps:
       - name: Checkout
@@ -24,26 +29,214 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle 8.13
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.13"
-          validate-wrappers: false
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Verify Gradle
-        run: gradle --version
-
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Locate APK
+      - name: Install Android SDK components
         run: |
-          find . -type f -name "*.apk" -print
+          sdkmanager "platform-tools" \
+                     "platforms;android-${ANDROID_API}" \
+                     "build-tools;${BUILD_TOOLS}"
+
+      - name: Prepare build directories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf native-build
+
+          mkdir -p native-build/compiled-res
+          mkdir -p native-build/generated
+          mkdir -p native-build/classes
+          mkdir -p native-build/dex
+          mkdir -p native-build/apk
+
+      - name: Generate native manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path("app/src/main/AndroidManifest.xml")
+          target = Path("native-build/AndroidManifest.xml")
+
+          text = source.read_text(encoding="utf-8")
+
+          # Keep the source manifest clean. The native build receives
+          # a temporary manifest containing the package attribute.
+          if re.search(r"<manifest\b[^>]*\bpackage\s*=", text):
+              text = re.sub(
+                  r'(\s+package\s*=\s*"[^"]*")',
+                  "",
+                  text,
+                  count=1,
+              )
+
+          text = re.sub(
+              r"<manifest\b",
+              '<manifest package="com.example.socialcontract"',
+              text,
+              count=1,
+          )
+
+          target.write_text(text, encoding="utf-8")
+          PY
+
+          grep -q 'package="com.example.socialcontract"' \
+            native-build/AndroidManifest.xml
+
+      - name: Compile Android resources with AAPT2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
+
+          find app/src/main/res -type f -print0 |
+          while IFS= read -r -d '' resource; do
+            echo "Compiling resource: ${resource}"
+
+            "${AAPT2}" compile \
+              --legacy \
+              -o native-build/compiled-res \
+              "${resource}"
+          done
+
+      - name: Link Android resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+
+          "${AAPT2}" link \
+            -o native-build/resources.apk \
+            --manifest native-build/AndroidManifest.xml \
+            -I "${ANDROID_JAR}" \
+            --java native-build/generated \
+            --auto-add-overlay \
+            native-build/compiled-res/*.flat
+
+      - name: Compile Java sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+
+          find app/src/main/java native-build/generated \
+            -type f \
+            -name "*.java" \
+            > native-build/java-sources.txt
+
+          test -s native-build/java-sources.txt
+
+          javac \
+            -source 17 \
+            -target 17 \
+            -encoding UTF-8 \
+            -classpath "${ANDROID_JAR}" \
+            -d native-build/classes \
+            @native-build/java-sources.txt
+
+      - name: Convert classes to DEX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          D8="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+
+          find native-build/classes \
+            -type f \
+            -name "*.class" \
+            > native-build/class-files.txt
+
+          test -s native-build/class-files.txt
+
+          "${D8}" \
+            --lib "${ANDROID_JAR}" \
+            --min-api 23 \
+            --output native-build/dex \
+            $(cat native-build/class-files.txt)
+
+      - name: Package APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd native-build/apk
+
+          unzip -q ../resources.apk
+
+          cp ../dex/classes.dex .
+
+          zip -q -r ../unsigned.apk .
+
+      - name: Align APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIPALIGN="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
+
+          "${ZIPALIGN}" \
+            -f 4 \
+            native-build/unsigned.apk \
+            native-build/aligned.apk
+
+      - name: Create debug signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore native-build/debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Sign APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+
+          "${APKSIGNER}" sign \
+            --ks native-build/debug.keystore \
+            --ks-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --key-pass pass:android \
+            --out native-build/app-debug.apk \
+            native-build/aligned.apk
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+
+          "${APKSIGNER}" verify --verbose native-build/app-debug.apk
+
+          test -f native-build/app-debug.apk
+
+          ls -lh native-build/app-debug.apk
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
           name: debug-apk
-          path: |
-            **/build/outputs/apk/debug/*.apk
+          path: native-build/app-debug.apk
           if-no-files-found: error
