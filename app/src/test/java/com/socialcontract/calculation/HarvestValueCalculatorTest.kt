@@ -1,4 +1,3 @@
-```kotlin
 package com.socialcontract.android.calculation
 
 import org.junit.Assert.assertEquals
@@ -92,5 +91,3 @@ class HarvestValueCalculatorTest {
         )
     }
 }
-```
-
