@@ -20,13 +20,11 @@ jobs:
       MIN_SDK: "23"
       PACKAGE_NAME: "com.example.socialcontract"
 
-      # Kotlin and Compose compiler must match.
       KOTLIN_VERSION: "2.1.21"
 
-      # Compose libraries.
-      COMPOSE_BOM: "2025.05.00"
+      COMPOSE_VERSION: "1.8.3"
       ACTIVITY_COMPOSE: "1.10.1"
-      MATERIAL3: "1.3.2"
+      MATERIAL3: "1.4.0"
 
     steps:
       - name: Checkout
@@ -45,6 +43,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
+          yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
             "platform-tools" \
@@ -72,27 +72,30 @@ jobs:
         run: |
           set -euxo pipefail
 
-          URL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+          KOTLIN_URL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
 
           curl \
             --fail \
             --silent \
             --show-error \
             --location \
-            "${URL}" \
+            "${KOTLIN_URL}" \
             --output kotlin.zip
 
-          rm -rf kotlin-dist
+          test -s kotlin.zip
 
+          rm -rf kotlin-dist
           mkdir -p kotlin-dist
 
           unzip -q kotlin.zip -d kotlin-dist
 
-          KOTLINC="$(find kotlin-dist \
-            -type f \
-            -name kotlinc \
-            -print \
-            -quit)"
+          KOTLINC="$(
+            find kotlin-dist \
+              -type f \
+              -name kotlinc \
+              -print \
+              -quit
+          )"
 
           test -n "${KOTLINC}"
 
@@ -118,7 +121,23 @@ jobs:
             native-build/dex \
             native-build/apk \
             native-build/libs \
-            native-build/m2
+            native-build/aar-classes \
+            native-build/aar-res
+
+      - name: Validate Android project
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          test -f app/src/main/AndroidManifest.xml
+          test -d app/src/main/res
+
+          if grep -Eq '<manifest[^>]*[[:space:]]package[[:space:]]*=' \
+            app/src/main/AndroidManifest.xml; then
+            echo "::error::AndroidManifest.xml must not contain package=."
+            echo "The package is supplied by the native build manifest."
+            exit 1
+          fi
 
       - name: Generate native manifest
         shell: bash
@@ -135,13 +154,10 @@ jobs:
           source = Path("app/src/main/AndroidManifest.xml")
           target = Path("native-build/AndroidManifest.xml")
 
-          if not source.is_file():
-              raise SystemExit("AndroidManifest.xml not found")
-
           text = source.read_text(encoding="utf-8")
 
           text = re.sub(
-              r'\s+package\s*=\s*"[^"]*"',
+              r"\s+package\s*=\s*\"[^\"]*\"",
               "",
               text,
               count=1,
@@ -168,18 +184,18 @@ jobs:
 
           AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
 
-          test -d app/src/main/res
+          mapfile -t RESOURCES < <(
+            find app/src/main/res \
+              -type f \
+              -print
+          )
 
-          while IFS= read -r -d '' file; do
+          for resource in "${RESOURCES[@]}"; do
             "${AAPT2}" compile \
               --legacy \
               -o native-build/compiled-res \
-              "${file}"
-          done < <(
-            find app/src/main/res \
-              -type f \
-              -print0
-          )
+              "${resource}"
+          done
 
       - name: Link Android resources
         shell: bash
@@ -205,15 +221,7 @@ jobs:
             --auto-add-overlay \
             "${FLAT[@]}"
 
-          test -f native-build/resources.apk
-
-      # ------------------------------------------------------------------
-      # Maven dependency resolver.
-      #
-      # This uses Maven only as a dependency downloader/resolver.
-      # It does NOT invoke Gradle and does not require gradlew,
-      # gradle-wrapper.jar, or any Gradle action.
-      # ------------------------------------------------------------------
+          test -s native-build/resources.apk
 
       - name: Install Maven
         shell: bash
@@ -221,12 +229,11 @@ jobs:
           set -euxo pipefail
 
           sudo apt-get update
-
           sudo apt-get install -y maven
 
           mvn --version
 
-      - name: Create native dependency descriptor
+      - name: Create dependency descriptor
         shell: bash
         run: |
           set -euxo pipefail
@@ -235,8 +242,7 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <project xmlns="http://maven.apache.org/POM/4.0.0"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-                   https://maven.apache.org/xsd/maven-4.0.0.xsd">
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 
             <modelVersion>4.0.0</modelVersion>
 
@@ -244,8 +250,14 @@ jobs:
             <artifactId>native-build</artifactId>
             <version>1.0.0</version>
 
-            <repositories>
+            <properties>
+              <kotlin.version>${KOTLIN_VERSION}</kotlin.version>
+              <compose.version>${COMPOSE_VERSION}</compose.version>
+              <activity.compose.version>${ACTIVITY_COMPOSE}</activity.compose.version>
+              <material3.version>${MATERIAL3}</material3.version>
+            </properties>
 
+            <repositories>
               <repository>
                 <id>google</id>
                 <url>https://dl.google.com/dl/android/maven2/</url>
@@ -255,61 +267,93 @@ jobs:
                 <id>central</id>
                 <url>https://repo1.maven.org/maven2/</url>
               </repository>
-
             </repositories>
+
+            <dependencyManagement>
+              <dependencies>
+
+                <dependency>
+                  <groupId>androidx.compose.runtime</groupId>
+                  <artifactId>runtime</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.ui</groupId>
+                  <artifactId>ui</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.ui</groupId>
+                  <artifactId>ui-tooling-preview</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.foundation</groupId>
+                  <artifactId>foundation</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.animation</groupId>
+                  <artifactId>animation</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.foundation</groupId>
+                  <artifactId>foundation-layout</artifactId>
+                  <version>${compose.version}</version>
+                </dependency>
+
+                <dependency>
+                  <groupId>androidx.compose.material3</groupId>
+                  <artifactId>material3</artifactId>
+                  <version>${material3.version}</version>
+                </dependency>
+
+              </dependencies>
+            </dependencyManagement>
 
             <dependencies>
 
-              <!-- AndroidX Activity -->
               <dependency>
                 <groupId>androidx.activity</groupId>
                 <artifactId>activity-compose</artifactId>
-                <version>${ACTIVITY_COMPOSE}</version>
+                <version>${activity.compose.version}</version>
               </dependency>
 
-              <!-- Compose -->
               <dependency>
                 <groupId>androidx.compose.runtime</groupId>
                 <artifactId>runtime</artifactId>
-                <version>1.8.3</version>
               </dependency>
 
               <dependency>
                 <groupId>androidx.compose.ui</groupId>
                 <artifactId>ui</artifactId>
-                <version>1.8.3</version>
               </dependency>
 
               <dependency>
                 <groupId>androidx.compose.ui</groupId>
                 <artifactId>ui-tooling-preview</artifactId>
-                <version>1.8.3</version>
               </dependency>
 
               <dependency>
                 <groupId>androidx.compose.foundation</groupId>
                 <artifactId>foundation</artifactId>
-                <version>1.8.3</version>
               </dependency>
 
               <dependency>
                 <groupId>androidx.compose.material3</groupId>
                 <artifactId>material3</artifactId>
-                <version>${MATERIAL3}</version>
               </dependency>
 
-              <!-- Kotlin standard library -->
               <dependency>
                 <groupId>org.jetbrains.kotlin</groupId>
                 <artifactId>kotlin-stdlib</artifactId>
-                <version>${KOTLIN_VERSION}</version>
-              </dependency>
-
-              <!-- Compose compiler plugin -->
-              <dependency>
-                <groupId>org.jetbrains.kotlin.plugin.compose</groupId>
-                <artifactId>org.jetbrains.kotlin.plugin.compose.gradle.plugin</artifactId>
-                <version>${KOTLIN_VERSION}</version>
+                <version>${kotlin.version}</version>
               </dependency>
 
             </dependencies>
@@ -317,7 +361,7 @@ jobs:
           </project>
           EOF
 
-      - name: Resolve AndroidX and Compose dependencies
+      - name: Resolve dependencies
         shell: bash
         run: |
           set -euxo pipefail
@@ -331,23 +375,24 @@ jobs:
             -DoutputDirectory=libs \
             -DincludeScope=runtime
 
-          echo "Resolved libraries:"
-
           find libs \
             -type f \
             \( -name "*.jar" -o -name "*.aar" \) \
             -print \
             | sort
 
-          test -n "$(find libs -type f -name '*.jar' -print -quit)"
+          test -n "$(
+            find libs \
+              -type f \
+              -name "*.jar" \
+              -print \
+              -quit
+          )"
 
-      - name: Extract Android AAR libraries
+      - name: Extract AAR libraries
         shell: bash
         run: |
           set -euxo pipefail
-
-          mkdir -p native-build/aar-classes
-          mkdir -p native-build/aar-res
 
           while IFS= read -r aar; do
 
@@ -359,13 +404,15 @@ jobs:
 
             unzip -q "${aar}" -d "${dir}"
 
-            if [ -d "${dir}/classes.jar" ]; then
-              cp "${dir}/classes.jar" \
+            if [ -f "${dir}/classes.jar" ]; then
+              cp \
+                "${dir}/classes.jar" \
                 "native-build/aar-classes/${name}.jar"
             fi
 
             if [ -d "${dir}/res" ]; then
-              cp -R "${dir}/res" \
+              cp -R \
+                "${dir}/res" \
                 "native-build/aar-res/${name}"
             fi
 
@@ -374,6 +421,49 @@ jobs:
               -type f \
               -name "*.aar"
           )
+
+      - name: Compile generated Java
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+
+          mapfile -t GENERATED_JAVA < <(
+            find native-build/generated \
+              -type f \
+              -name "*.java"
+          )
+
+          if [ "${#GENERATED_JAVA[@]}" -gt 0 ]; then
+
+            javac \
+              -source 17 \
+              -target 17 \
+              -encoding UTF-8 \
+              -classpath "${ANDROID_JAR}" \
+              -d native-build/classes \
+              "${GENERATED_JAVA[@]}"
+
+          fi
+
+      - name: Discover production Kotlin sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          find app/src/main \
+            -type f \
+            -name "*.kt" \
+            ! -name "*Test.kt" \
+            ! -path "*/androidTest/*" \
+            ! -path "*/test/*" \
+            -print \
+            > native-build/kotlin-sources.txt
+
+          cat native-build/kotlin-sources.txt
+
+          test -s native-build/kotlin-sources.txt
 
       - name: Build Kotlin classpath
         shell: bash
@@ -393,87 +483,9 @@ jobs:
               | sort
           )
 
-          echo "KOTLIN_CLASSPATH=${CLASSPATH}" \
-            >> "${GITHUB_ENV}"
+          echo "KOTLIN_CLASSPATH=${CLASSPATH}" >> "${GITHUB_ENV}"
 
-      - name: Discover production Kotlin sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          find app/src/main \
-            -type f \
-            -name "*.kt" \
-            ! -name "*Test.kt" \
-            ! -name "*Test*.kt" \
-            -print \
-            > native-build/kotlin-sources.txt
-
-          echo "Production Kotlin sources:"
-
-          cat native-build/kotlin-sources.txt
-
-          test -s native-build/kotlin-sources.txt
-
-      - name: Compile generated Java
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          find native-build/generated \
-            -type f \
-            -name "*.java" \
-            -print \
-            > native-build/generated-java.txt
-
-          if [ -s native-build/generated-java.txt ]; then
-
-            javac \
-              -source 17 \
-              -target 17 \
-              -encoding UTF-8 \
-              -classpath "${KOTLIN_CLASSPATH}" \
-              -d native-build/classes \
-              @native-build/generated-java.txt
-
-          fi
-
-      - name: Locate Compose compiler plugin
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          COMPOSE_PLUGIN="$(
-            find native-build/libs \
-              -type f \
-              \( \
-                -name "*compose*compiler*.jar" \
-                -o \
-                -name "*compose*.gradle.plugin*.jar" \
-              \) \
-              -print \
-              | head -n 1
-          )"
-
-          if [ -z "${COMPOSE_PLUGIN}" ]; then
-            echo "::error::Compose compiler plugin was not resolved"
-
-            find native-build/libs \
-              -type f \
-              -name "*.jar" \
-              -print \
-              | sort
-
-            exit 1
-          fi
-
-          echo "Compose compiler candidate:"
-          echo "${COMPOSE_PLUGIN}"
-
-          echo "COMPOSE_PLUGIN=${COMPOSE_PLUGIN}" \
-            >> "${GITHUB_ENV}"
-
-      - name: Compile Kotlin and Compose
+      - name: Compile Kotlin
         shell: bash
         run: |
           set -euxo pipefail
@@ -481,11 +493,10 @@ jobs:
           kotlinc \
             -jvm-target 17 \
             -classpath "${KOTLIN_CLASSPATH}" \
-            -Xplugin="${COMPOSE_PLUGIN}" \
             -d native-build/classes \
             @native-build/kotlin-sources.txt
 
-      - name: Verify compiled classes
+      - name: Verify classes
         shell: bash
         run: |
           set -euxo pipefail
@@ -493,8 +504,7 @@ jobs:
           find native-build/classes \
             -type f \
             -name "*.class" \
-            -print \
-            | sort
+            -print
 
           test -n "$(
             find native-build/classes \
@@ -504,30 +514,7 @@ jobs:
               -quit
           )"
 
-      - name: Build D8 classpath
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          D8_CLASSPATH=""
-
-          while IFS= read -r jar; do
-            if [ -z "${D8_CLASSPATH}" ]; then
-              D8_CLASSPATH="${jar}"
-            else
-              D8_CLASSPATH="${D8_CLASSPATH}:${jar}"
-            fi
-          done < <(
-            find native-build/libs native-build/aar-classes \
-              -type f \
-              -name "*.jar" \
-              | sort
-          )
-
-          echo "D8_CLASSPATH=${D8_CLASSPATH}" \
-            >> "${GITHUB_ENV}"
-
-      - name: Convert classes and libraries to DEX
+      - name: Convert classes and dependencies to DEX
         shell: bash
         run: |
           set -euxo pipefail
@@ -535,28 +522,29 @@ jobs:
           D8="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
           ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
 
-          mapfile -t CLASS_FILES < <(
+          mapfile -t INPUTS < <(
             find native-build/classes \
               -type f \
               -name "*.class"
           )
 
-          test "${#CLASS_FILES[@]}" -gt 0
-
-          mapfile -t LIBRARIES < <(
+          while IFS= read -r jar; do
+            INPUTS+=("${jar}")
+          done < <(
             find native-build/libs native-build/aar-classes \
               -type f \
               -name "*.jar"
           )
 
+          test "${#INPUTS[@]}" -gt 0
+
           "${D8}" \
             --lib "${ANDROID_JAR}" \
             --min-api "${MIN_SDK}" \
             --output native-build/dex \
-            "${CLASS_FILES[@]}" \
-            "${LIBRARIES[@]}"
+            "${INPUTS[@]}"
 
-          test -f native-build/dex/classes.dex
+          test -s native-build/dex/classes.dex
 
       - name: Package unsigned APK
         shell: bash
@@ -575,7 +563,7 @@ jobs:
             ../unsigned.apk \
             .
 
-          test -f ../unsigned.apk
+          test -s ../unsigned.apk
 
       - name: Align APK
         shell: bash
@@ -589,6 +577,8 @@ jobs:
             4 \
             native-build/unsigned.apk \
             native-build/aligned.apk
+
+          test -s native-build/aligned.apk
 
       - name: Create debug signing key
         shell: bash
@@ -622,6 +612,8 @@ jobs:
             --out native-build/app-debug.apk \
             native-build/aligned.apk
 
+          test -s native-build/app-debug.apk
+
       - name: Verify APK
         shell: bash
         run: |
@@ -629,10 +621,9 @@ jobs:
 
           APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
 
-          "${APKSIGNER}" verify --verbose \
+          "${APKSIGNER}" verify \
+            --verbose \
             native-build/app-debug.apk
-
-          test -s native-build/app-debug.apk
 
           ls -lh native-build/app-debug.apk
 
