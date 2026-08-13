@@ -1,4 +1,3 @@
-```kotlin id="cq2n6a"
 package com.socialcontract.android.calculation
 
 import org.junit.Assert.assertFalse
@@ -136,5 +135,3 @@ class ShareValidatorTest {
         )
     }
 }
-```
-
