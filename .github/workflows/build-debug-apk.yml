@@ -18,6 +18,7 @@ jobs:
       ANDROID_API: "35"
       BUILD_TOOLS: "35.0.0"
       PACKAGE_NAME: "com.example.socialcontract"
+      KOTLIN_VERSION: "2.1.21"
 
     steps:
       - name: Checkout
@@ -34,9 +35,31 @@ jobs:
 
       - name: Install Android SDK components
         run: |
-          sdkmanager "platform-tools" \
-                     "platforms;android-${ANDROID_API}" \
-                     "build-tools;${BUILD_TOOLS}"
+          set -euo pipefail
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${BUILD_TOOLS}"
+
+      - name: Install Kotlin compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KOTLIN_URL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+
+          curl --fail --silent --show-error --location \
+            "${KOTLIN_URL}" \
+            --output native-kotlin.zip
+
+          rm -rf native-kotlin
+
+          unzip -q native-kotlin.zip
+
+          test -x kotlin-compiler/bin/kotlinc
+
+          echo "${GITHUB_WORKSPACE}/kotlin-compiler/bin" >> "${GITHUB_PATH}"
 
       - name: Prepare build directories
         shell: bash
@@ -65,15 +88,12 @@ jobs:
 
           text = source.read_text(encoding="utf-8")
 
-          # Keep the source manifest clean. The native build receives
-          # a temporary manifest containing the package attribute.
-          if re.search(r"<manifest\b[^>]*\bpackage\s*=", text):
-              text = re.sub(
-                  r'(\s+package\s*=\s*"[^"]*")',
-                  "",
-                  text,
-                  count=1,
-              )
+          text = re.sub(
+              r'\s+package\s*=\s*"[^"]*"',
+              "",
+              text,
+              count=1,
+          )
 
           text = re.sub(
               r"<manifest\b",
@@ -95,7 +115,9 @@ jobs:
 
           AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
 
-          find app/src/main/res -type f -print0 |
+          find app/src/main/res \
+            -type f \
+            -print0 |
           while IFS= read -r -d '' resource; do
             echo "Compiling resource: ${resource}"
 
@@ -121,27 +143,57 @@ jobs:
             --auto-add-overlay \
             native-build/compiled-res/*.flat
 
-      - name: Compile Java sources
+      - name: Discover Kotlin sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find app/src/main \
+            -type f \
+            -name "*.kt" \
+            -print \
+            > native-build/kotlin-sources.txt
+
+          echo "Kotlin sources:"
+          cat native-build/kotlin-sources.txt
+
+          test -s native-build/kotlin-sources.txt
+
+      - name: Compile Kotlin sources
         shell: bash
         run: |
           set -euo pipefail
 
           ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
 
-          find app/src/main/java native-build/generated \
+          kotlinc \
+            -jvm-target 17 \
+            -classpath "${ANDROID_JAR}:native-build/generated" \
+            -d native-build/classes \
+            @native-build/kotlin-sources.txt
+
+      - name: Compile generated Java sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+
+          find native-build/generated \
             -type f \
             -name "*.java" \
+            -print \
             > native-build/java-sources.txt
 
-          test -s native-build/java-sources.txt
-
-          javac \
-            -source 17 \
-            -target 17 \
-            -encoding UTF-8 \
-            -classpath "${ANDROID_JAR}" \
-            -d native-build/classes \
-            @native-build/java-sources.txt
+          if [ -s native-build/java-sources.txt ]; then
+            javac \
+              -source 17 \
+              -target 17 \
+              -encoding UTF-8 \
+              -classpath "${ANDROID_JAR}:native-build/classes" \
+              -d native-build/classes \
+              @native-build/java-sources.txt
+          fi
 
       - name: Convert classes to DEX
         shell: bash
@@ -154,6 +206,7 @@ jobs:
           find native-build/classes \
             -type f \
             -name "*.class" \
+            -print \
             > native-build/class-files.txt
 
           test -s native-build/class-files.txt
