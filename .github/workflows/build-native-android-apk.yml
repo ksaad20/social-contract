@@ -11,33 +11,12 @@ permissions:
 
 jobs:
   build:
-    name: Build Debug APK Without Gradle
+    name: Build Debug APK
     runs-on: ubuntu-latest
 
-    env:
-      ANDROID_API: "35"
-      BUILD_TOOLS: "35.0.0"
-      MIN_SDK: "23"
-      PACKAGE_NAME: "com.example.socialcontract"
-
-      KOTLIN_VERSION: "2.1.21"
-
-      ACTIVITY_COMPOSE: "1.10.1"
-      MATERIAL3: "1.3.2"
-
-      COMPOSE_VERSION: "1.8.3"
-
     steps:
-      # ---------------------------------------------------------------
-      # Source
-      # ---------------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v6
-
-      # ---------------------------------------------------------------
-      # Java
-      # ---------------------------------------------------------------
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -45,937 +24,160 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ---------------------------------------------------------------
-      # Android SDK
-      # ---------------------------------------------------------------
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
-        shell: bash
+      - name: Install Android SDK components
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;${BUILD_TOOLS}"
+          sdkmanager "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      - name: Verify Android toolchain
-        shell: bash
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.13"
+          validate-wrappers: false
+
+      - name: Verify project structure
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          SDK="${ANDROID_HOME}"
-          BT="${SDK}/build-tools/${BUILD_TOOLS}"
+          echo "Project root:"
+          pwd
 
-          test -f "${SDK}/platforms/android-${ANDROID_API}/android.jar"
-          test -x "${BT}/aapt2"
-          test -x "${BT}/d8"
-          test -x "${BT}/zipalign"
-          test -x "${BT}/apksigner"
-
-          java -version
-
-      # ---------------------------------------------------------------
-      # Kotlin compiler
-      # ---------------------------------------------------------------
-
-      - name: Install Kotlin compiler
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          KOTLIN_URL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            "${KOTLIN_URL}" \
-            --output kotlin.zip
-
-          test -s kotlin.zip
-
-          rm -rf kotlin-dist
-
-          mkdir -p kotlin-dist
-
-          unzip -q kotlin.zip -d kotlin-dist
-
-          KOTLINC="$(
-            find kotlin-dist \
-              -type f \
-              -name kotlinc \
-              -print \
-              -quit
-          )"
-
-          test -n "${KOTLINC}"
-
-          chmod +x "${KOTLINC}"
-
-          KOTLIN_BIN="$(dirname "${KOTLINC}")"
-
-          echo "${KOTLIN_BIN}" >> "${GITHUB_PATH}"
-
-          "${KOTLINC}" -version
-
-      # ---------------------------------------------------------------
-      # Build directories
-      # ---------------------------------------------------------------
-
-      - name: Prepare build directories
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf native-build
-
-          mkdir -p \
-            native-build/compiled-res \
-            native-build/generated \
-            native-build/classes \
-            native-build/dex \
-            native-build/apk \
-            native-build/libs \
-            native-build/aar-classes \
-            native-build/aar-res
-
-      # ---------------------------------------------------------------
-      # Manifest
-      # ---------------------------------------------------------------
-
-      - name: Generate native manifest
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          python3 - "${PACKAGE_NAME}" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          package_name = sys.argv[1]
-
-          source = Path("app/src/main/AndroidManifest.xml")
-          target = Path("native-build/AndroidManifest.xml")
-
-          if not source.is_file():
-              raise SystemExit(
-                  "app/src/main/AndroidManifest.xml not found"
-              )
-
-          text = source.read_text(encoding="utf-8")
-
-          # Remove an existing package attribute from the source
-          # manifest. The native build uses its own temporary manifest.
-          text = re.sub(
-              r'\s+package\s*=\s*"[^"]*"',
-              "",
-              text,
-              count=1,
-          )
-
-          # Insert the package required by the native AAPT2 build.
-          text = re.sub(
-              r"<manifest\b",
-              f'<manifest package="{package_name}"',
-              text,
-              count=1,
-          )
-
-          target.write_text(text, encoding="utf-8")
-          PY
-
-          grep -q \
-            "package=\"${PACKAGE_NAME}\"" \
-            native-build/AndroidManifest.xml
-
-          cat native-build/AndroidManifest.xml
-
-      # ---------------------------------------------------------------
-      # Application resources
-      # ---------------------------------------------------------------
-
-      - name: Compile Android resources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-
-          test -d app/src/main/res
-
-          mapfile -t RESOURCES < <(
-            find app/src/main/res \
-              -type f \
-              -print \
-              | sort
-          )
-
-          test "${#RESOURCES[@]}" -gt 0
-
-          for resource in "${RESOURCES[@]}"; do
-            echo "Compiling resource: ${resource}"
-
-            "${AAPT2}" compile \
-              --legacy \
-              -o native-build/compiled-res \
-              "${resource}"
-          done
-
-      - name: Link Android resources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
-          mapfile -t FLAT < <(
-            find native-build/compiled-res \
-              -type f \
-              -name "*.flat" \
-              | sort
-          )
-
-          test "${#FLAT[@]}" -gt 0
-
-          "${AAPT2}" link \
-            -o native-build/resources.apk \
-            --manifest native-build/AndroidManifest.xml \
-            -I "${ANDROID_JAR}" \
-            --java native-build/generated \
-            --auto-add-overlay \
-            "${FLAT[@]}"
-
-          test -s native-build/resources.apk
-
-      # ---------------------------------------------------------------
-      # Maven
-      #
-      # Maven is used only to download AndroidX/Compose artifacts.
-      # It does NOT build the application.
-      #
-      # No:
-      #   gradlew
-      #   gradle-wrapper.jar
-      #   Gradle wrapper
-      #   Gradle action
-      # ---------------------------------------------------------------
-
-      - name: Install Maven
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y maven
-
-          mvn --version
-
-      # ---------------------------------------------------------------
-      # Dependency descriptor
-      # ---------------------------------------------------------------
-
-      - name: Create native dependency descriptor
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cat > native-build/pom.xml <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-
-          <project
-            xmlns="http://maven.apache.org/POM/4.0.0"
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-            xsi:schemaLocation="
-              http://maven.apache.org/POM/4.0.0
-              https://maven.apache.org/xsd/maven-4.0.0.xsd">
-
-            <modelVersion>4.0.0</modelVersion>
-
-            <groupId>com.socialcontract</groupId>
-            <artifactId>native-build</artifactId>
-            <version>1.0.0</version>
-
-            <repositories>
-
-              <repository>
-                <id>google</id>
-                <url>https://dl.google.com/dl/android/maven2/</url>
-              </repository>
-
-              <repository>
-                <id>central</id>
-                <url>https://repo1.maven.org/maven2/</url>
-              </repository>
-
-            </repositories>
-
-            <dependencies>
-
-              <!-- AndroidX Activity -->
-
-              <dependency>
-                <groupId>androidx.activity</groupId>
-                <artifactId>activity-compose</artifactId>
-                <version>${ACTIVITY_COMPOSE}</version>
-              </dependency>
-
-              <!-- Compose Runtime -->
-
-              <dependency>
-                <groupId>androidx.compose.runtime</groupId>
-                <artifactId>runtime</artifactId>
-                <version>${COMPOSE_VERSION}</version>
-              </dependency>
-
-              <!-- Compose UI -->
-
-              <dependency>
-                <groupId>androidx.compose.ui</groupId>
-                <artifactId>ui</artifactId>
-                <version>${COMPOSE_VERSION}</version>
-              </dependency>
-
-              <dependency>
-                <groupId>androidx.compose.ui</groupId>
-                <artifactId>ui-tooling-preview</artifactId>
-                <version>${COMPOSE_VERSION}</version>
-              </dependency>
-
-              <!-- Compose Foundation -->
-
-              <dependency>
-                <groupId>androidx.compose.foundation</groupId>
-                <artifactId>foundation</artifactId>
-                <version>${COMPOSE_VERSION}</version>
-              </dependency>
-
-              <!-- Compose Material3 -->
-
-              <dependency>
-                <groupId>androidx.compose.material3</groupId>
-                <artifactId>material3</artifactId>
-                <version>${MATERIAL3}</version>
-              </dependency>
-
-              <!-- Kotlin -->
-
-              <dependency>
-                <groupId>org.jetbrains.kotlin</groupId>
-                <artifactId>kotlin-stdlib</artifactId>
-                <version>${KOTLIN_VERSION}</version>
-              </dependency>
-
-              <!-- Compose compiler -->
-
-              <dependency>
-                <groupId>org.jetbrains.kotlin.plugin.compose</groupId>
-                <artifactId>
-                  org.jetbrains.kotlin.plugin.compose.gradle.plugin
-                </artifactId>
-                <version>${KOTLIN_VERSION}</version>
-              </dependency>
-
-            </dependencies>
-
-          </project>
-          EOF
-
-          test -s native-build/pom.xml
-
-      # ---------------------------------------------------------------
-      # Dependency resolution
-      # ---------------------------------------------------------------
-
-      - name: Resolve AndroidX and Compose dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd native-build
-
-          mvn \
-            -B \
-            -q \
-            dependency:copy-dependencies \
-            -DoutputDirectory=libs \
-            -DincludeScope=runtime \
-            -DoverWriteIfNewer=true
-
-          echo "Resolved libraries:"
-
-          find libs \
+          echo
+          echo "Gradle files:"
+          find . -maxdepth 3 \
             -type f \
             \( \
-              -name "*.jar" \
-              -o \
-              -name "*.aar" \
+              -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+              -o -name "build.gradle" \
+              -o -name "build.gradle.kts" \
+              -o -name "gradle.properties" \
             \) \
-            -print \
-            | sort
+            -print | sort
 
-          test -n "$(
-            find libs \
-              -type f \
-              -name "*.jar" \
-              -print \
-              -quit
-          )"
-
-      # ---------------------------------------------------------------
-      # AAR extraction
-      # ---------------------------------------------------------------
-
-      - name: Extract Android AAR libraries
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          while IFS= read -r aar; do
-
-            name="$(basename "${aar}" .aar)"
-            dir="native-build/aar-${name}"
-
-            rm -rf "${dir}"
-            mkdir -p "${dir}"
-
-            echo "Extracting ${aar}"
-
-            unzip -q "${aar}" -d "${dir}"
-
-            # classes.jar is a FILE, not a directory.
-            if [ -f "${dir}/classes.jar" ]; then
-              cp \
-                "${dir}/classes.jar" \
-                "native-build/aar-classes/${name}.jar"
-            fi
-
-            if [ -d "${dir}/res" ]; then
-              mkdir -p "native-build/aar-res/${name}"
-
-              cp -R \
-                "${dir}/res/." \
-                "native-build/aar-res/${name}/"
-            fi
-
-          done < <(
-            find native-build/libs \
-              -type f \
-              -name "*.aar" \
-              | sort
-          )
-
-          echo "Extracted AAR classes:"
-
-          find native-build/aar-classes \
+          echo
+          echo "Kotlin sources:"
+          find app/src/main \
             -type f \
-            -name "*.jar" \
+            \( -name "*.kt" -o -name "*.kts" \) \
+            -print | sort
+
+          echo
+          echo "Manifest:"
+          test -f app/src/main/AndroidManifest.xml
+          sed -n '1,160p' app/src/main/AndroidManifest.xml
+
+      - name: Verify Android namespace
+        run: |
+          set -euo pipefail
+
+          test -f app/build.gradle.kts || {
+            echo "::error::app/build.gradle.kts was not found."
+            exit 1
+          }
+
+          echo "Android namespace configuration:"
+          grep -n "namespace" app/build.gradle.kts || true
+
+          if ! grep -q 'namespace[[:space:]]*=' app/build.gradle.kts; then
+            echo "::error::The Android namespace is missing from app/build.gradle.kts."
+            echo "Add:"
+            echo 'namespace = "com.example.socialcontract"'
+            exit 1
+          fi
+
+      - name: Verify manifest has no package attribute
+        run: |
+          set -euo pipefail
+
+          MANIFEST="app/src/main/AndroidManifest.xml"
+
+          if grep -Eq '<manifest[^>]*[[:space:]]package[[:space:]]*=' "$MANIFEST"; then
+            echo "::error::AndroidManifest.xml still contains a package attribute."
+            echo "With modern Android Gradle Plugin, namespace belongs in app/build.gradle.kts."
+            exit 1
+          fi
+
+          echo "Manifest package attribute check passed."
+
+      - name: Verify Kotlin source layout
+        run: |
+          set -euo pipefail
+
+          test -d app/src/main
+
+          if ! find app/src/main \
+            -type f \
+            -name "*.kt" \
             -print \
-            | sort
+            -quit | grep -q .; then
+            echo "::error::No Kotlin source files were found under app/src/main."
+            exit 1
+          fi
 
-      # ---------------------------------------------------------------
-      # Kotlin classpath
-      # ---------------------------------------------------------------
-
-      - name: Build Kotlin classpath
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
-          CLASSPATH="${ANDROID_JAR}"
-
-          while IFS= read -r jar; do
-            CLASSPATH="${CLASSPATH}:${jar}"
-          done < <(
-            find \
-              native-build/libs \
-              native-build/aar-classes \
-              -type f \
-              -name "*.jar" \
-              | sort
-          )
-
-          echo "KOTLIN_CLASSPATH=${CLASSPATH}" \
-            >> "${GITHUB_ENV}"
-
-      # ---------------------------------------------------------------
-      # Production Kotlin sources
-      # ---------------------------------------------------------------
-
-      - name: Discover production Kotlin sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
+          echo "Kotlin source files found:"
           find app/src/main \
             -type f \
             -name "*.kt" \
-            ! -path "*/test/*" \
-            ! -path "*/androidTest/*" \
-            ! -name "*Test.kt" \
-            ! -name "*Test*.kt" \
-            -print \
-            | sort \
-            > native-build/kotlin-sources.txt
+            -print | sort
 
-          echo "Production Kotlin sources:"
-          cat native-build/kotlin-sources.txt
-
-          test -s native-build/kotlin-sources.txt
-
-      # ---------------------------------------------------------------
-      # Generated Android resource Java
-      # ---------------------------------------------------------------
-
-      - name: Compile generated Java
-        shell: bash
+      - name: Clean previous build
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          find native-build/generated \
+          gradle clean --no-daemon
+
+      - name: Build Debug APK
+        run: |
+          set -euo pipefail
+
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Locate APK
+        run: |
+          set -euo pipefail
+
+          echo "Generated APK files:"
+
+          find app/build/outputs/apk \
             -type f \
-            -name "*.java" \
-            -print \
-            | sort \
-            > native-build/generated-java.txt
+            -name "*.apk" \
+            -print
 
-          if [ -s native-build/generated-java.txt ]; then
-
-            javac \
-              -source 17 \
-              -target 17 \
-              -encoding UTF-8 \
-              -classpath "${KOTLIN_CLASSPATH}" \
-              -d native-build/classes \
-              @native-build/generated-java.txt
-
-          fi
-
-      # ---------------------------------------------------------------
-      # Compose compiler
-      # ---------------------------------------------------------------
-
-      - name: Locate Compose compiler
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          COMPOSE_PLUGIN="$(
-            find native-build/libs \
+          test -n "$(
+            find app/build/outputs/apk \
               -type f \
-              -name "*.jar" \
-              \( \
-                -name "*compose*compiler*.jar" \
-                -o \
-                -name "*compose*.gradle.plugin*.jar" \
-              \) \
+              -name "*.apk" \
               -print \
-              | head -n 1
+              -quit
           )"
-
-          if [ -z "${COMPOSE_PLUGIN}" ]; then
-            echo "::error::Compose compiler plugin was not resolved"
-
-            echo "Available JARs:"
-            find native-build/libs \
-              -type f \
-              -name "*.jar" \
-              -print \
-              | sort
-
-            exit 1
-          fi
-
-          echo "Compose compiler candidate:"
-          echo "${COMPOSE_PLUGIN}"
-
-          echo "COMPOSE_PLUGIN=${COMPOSE_PLUGIN}" \
-            >> "${GITHUB_ENV}"
-
-      # ---------------------------------------------------------------
-      # Kotlin compilation
-      # ---------------------------------------------------------------
-
-      - name: Compile Kotlin and Compose
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          kotlinc \
-            -jvm-target 17 \
-            -classpath "${KOTLIN_CLASSPATH}" \
-            -Xplugin="${COMPOSE_PLUGIN}" \
-            -d native-build/classes \
-            @native-build/kotlin-sources.txt
-
-      # ---------------------------------------------------------------
-      # CRITICAL DIAGNOSTIC
-      #
-      # Verify that MainActivity actually exists before D8.
-      # ---------------------------------------------------------------
-
-      - name: Verify MainActivity compilation
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "Searching compiled classes for MainActivity..."
-
-          find native-build/classes \
-            -type f \
-            -name "*MainActivity*.class" \
-            -print \
-            | sort
-
-          if ! find native-build/classes \
-            -type f \
-            -name "MainActivity.class" \
-            -print \
-            -quit \
-            | grep -q .; then
-
-            echo "::error::MainActivity.class was not produced"
-
-            echo "All compiled classes:"
-            find native-build/classes \
-              -type f \
-              -name "*.class" \
-              -print \
-              | sort
-
-            exit 1
-          fi
-
-      # ---------------------------------------------------------------
-      # General class verification
-      # ---------------------------------------------------------------
-
-      - name: Verify compiled classes
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          CLASS_COUNT="$(
-            find native-build/classes \
-              -type f \
-              -name "*.class" \
-              | wc -l
-          )"
-
-          echo "Compiled class count: ${CLASS_COUNT}"
-
-          test "${CLASS_COUNT}" -gt 0
-
-      # ---------------------------------------------------------------
-      # D8
-      # ---------------------------------------------------------------
-
-      - name: Convert classes and libraries to DEX
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          D8="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
-          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
-          mapfile -t CLASS_FILES < <(
-            find native-build/classes \
-              -type f \
-              -name "*.class" \
-              | sort
-          )
-
-          test "${#CLASS_FILES[@]}" -gt 0
-
-          mapfile -t LIBRARIES < <(
-            find \
-              native-build/libs \
-              native-build/aar-classes \
-              -type f \
-              -name "*.jar" \
-              | sort
-          )
-
-          echo "Class files: ${#CLASS_FILES[@]}"
-          echo "Library JARs: ${#LIBRARIES[@]}"
-
-          "${D8}" \
-            --lib "${ANDROID_JAR}" \
-            --min-api "${MIN_SDK}" \
-            --output native-build/dex \
-            "${CLASS_FILES[@]}" \
-            "${LIBRARIES[@]}"
-
-          # D8 may produce:
-          #
-          # classes.dex
-          # classes2.dex
-          # classes3.dex
-          # ...
-          #
-          # Therefore NEVER assume classes.dex is the only output.
-
-          mapfile -t DEX_FILES < <(
-            find native-build/dex \
-              -maxdepth 1 \
-              -type f \
-              -name "*.dex" \
-              | sort -V
-          )
-
-          echo "D8 produced ${#DEX_FILES[@]} DEX file(s):"
-
-          printf '%s\n' "${DEX_FILES[@]}"
-
-          test "${#DEX_FILES[@]}" -gt 0
-
-          for dex in "${DEX_FILES[@]}"; do
-            test -s "${dex}"
-          done
-
-      # ---------------------------------------------------------------
-      # Inspect DEX files
-      #
-      # This gives us evidence that MainActivity survived D8.
-      # ---------------------------------------------------------------
-
-      - name: Verify MainActivity is in DEX output
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          DEX_FOUND=false
-
-          for dex in native-build/dex/*.dex; do
-            echo "Inspecting ${dex}"
-
-            if "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8" \
-              --help >/dev/null 2>&1; then
-              :
-            fi
-
-            if strings "${dex}" \
-              | grep -q "com/socialcontract/MainActivity"; then
-
-              echo "MainActivity found in ${dex}"
-              DEX_FOUND=true
-            fi
-          done
-
-          if [ "${DEX_FOUND}" != "true" ]; then
-            echo "::error::MainActivity was not found in any DEX file"
-
-            for dex in native-build/dex/*.dex; do
-              echo "DEX: ${dex}"
-              ls -lh "${dex}"
-            done
-
-            exit 1
-          fi
-
-      # ---------------------------------------------------------------
-      # CRITICAL FIX:
-      #
-      # Package ALL DEX files, not just classes.dex.
-      # ---------------------------------------------------------------
-
-      - name: Package unsigned APK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf native-build/apk
-
-          mkdir -p native-build/apk
-
-          unzip -q \
-            native-build/resources.apk \
-            -d native-build/apk
-
-          mapfile -t DEX_FILES < <(
-            find native-build/dex \
-              -maxdepth 1 \
-              -type f \
-              -name "*.dex" \
-              | sort -V
-          )
-
-          test "${#DEX_FILES[@]}" -gt 0
-
-          echo "Packaging ${#DEX_FILES[@]} DEX file(s):"
-
-          for dex in "${DEX_FILES[@]}"; do
-
-            echo "Packaging DEX: ${dex}"
-
-            cp \
-              "${dex}" \
-              "native-build/apk/$(basename "${dex}")"
-
-          done
-
-          echo "APK staging directory:"
-
-          find native-build/apk \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-          # Confirm every DEX was copied.
-          for dex in "${DEX_FILES[@]}"; do
-
-            packaged="native-build/apk/$(basename "${dex}")"
-
-            test -s "${packaged}"
-
-          done
-
-          (
-            cd native-build/apk
-
-            zip \
-              -q \
-              -r \
-              ../unsigned.apk \
-              .
-          )
-
-          test -s native-build/unsigned.apk
-
-      # ---------------------------------------------------------------
-      # Verify APK contains every DEX
-      # ---------------------------------------------------------------
-
-      - name: Verify APK DEX contents
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "DEX files inside unsigned APK:"
-
-          unzip -l native-build/unsigned.apk \
-            | grep -E 'classes[0-9]*\.dex'
-
-          EXPECTED="$(
-            find native-build/dex \
-              -maxdepth 1 \
-              -type f \
-              -name "*.dex" \
-              | wc -l
-          )"
-
-          ACTUAL="$(
-            unzip -Z1 native-build/unsigned.apk \
-              | grep -E '^classes[0-9]*\.dex$' \
-              | wc -l
-          )"
-
-          echo "Expected DEX files: ${EXPECTED}"
-          echo "APK DEX files:      ${ACTUAL}"
-
-          test "${EXPECTED}" -eq "${ACTUAL}"
-
-      # ---------------------------------------------------------------
-      # Align
-      # ---------------------------------------------------------------
-
-      - name: Align APK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          ZIPALIGN="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
-
-          "${ZIPALIGN}" \
-            -f \
-            4 \
-            native-build/unsigned.apk \
-            native-build/aligned.apk
-
-          test -s native-build/aligned.apk
-
-      # ---------------------------------------------------------------
-      # Debug signing
-      # ---------------------------------------------------------------
-
-      - name: Create debug signing key
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          keytool \
-            -genkeypair \
-            -v \
-            -keystore native-build/debug.keystore \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-      - name: Sign APK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
-
-          "${APKSIGNER}" sign \
-            --ks native-build/debug.keystore \
-            --ks-pass pass:android \
-            --ks-key-alias androiddebugkey \
-            --key-pass pass:android \
-            --out native-build/app-debug.apk \
-            native-build/aligned.apk
-
-          test -s native-build/app-debug.apk
-
-      # ---------------------------------------------------------------
-      # Final APK verification
-      # ---------------------------------------------------------------
 
       - name: Verify APK
-        shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          "${APKSIGNER}" verify \
-            --verbose \
-            native-build/app-debug.apk
+          test -f "$APK"
+          test -s "$APK"
 
-          echo
-          echo "Final APK:"
-          ls -lh native-build/app-debug.apk
+          echo "APK:"
+          ls -lh "$APK"
 
           echo
-          echo "Final APK DEX files:"
-
-          unzip -Z1 native-build/app-debug.apk \
-            | grep -E '^classes[0-9]*\.dex$' \
-            | sort -V
-
-          test -s native-build/app-debug.apk
-
-      # ---------------------------------------------------------------
-      # Upload
-      # ---------------------------------------------------------------
+          echo "APK metadata:"
+          "${ANDROID_HOME}/build-tools/35.0.0/aapt" \
+            dump badging "$APK" | head -n 20
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
-          name: debug-apk
-          path: native-build/app-debug.apk
+          name: cropshare-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
