@@ -49,23 +49,14 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
+          BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}"
 
-          test -f \
-            "${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
-          test -x \
-            "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-
-          test -x \
-            "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
-
-          test -x \
-            "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
-
-          test -x \
-            "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+          test -f "${ANDROID_JAR}"
+          test -x "${BUILD_TOOLS_DIR}/aapt2"
+          test -x "${BUILD_TOOLS_DIR}/d8"
+          test -x "${BUILD_TOOLS_DIR}/zipalign"
+          test -x "${BUILD_TOOLS_DIR}/apksigner"
 
           java -version
 
@@ -86,47 +77,44 @@ jobs:
 
           test -s kotlin-compiler.zip
 
-          rm -rf kotlin-compiler
+          rm -rf kotlin-dist
+
+          mkdir -p kotlin-dist
 
           unzip \
             -q \
-            kotlin-compiler.zip
+            kotlin-compiler.zip \
+            -d kotlin-dist
 
-          test -x kotlin-compiler/bin/kotlinc
+          echo "Kotlin compiler contents:"
+          find kotlin-dist \
+            -type f \
+            -name kotlinc \
+            -print
 
-          kotlin-compiler/bin/kotlinc -version
+          KOTLINC="$(find kotlin-dist \
+            -type f \
+            -name kotlinc \
+            -print \
+            -quit)"
 
-          echo "${GITHUB_WORKSPACE}/kotlin-compiler/bin" >> "${GITHUB_PATH}"
-
-      - name: Inspect Android project
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "=== Android project ==="
-
-          if [ -d app ]; then
-            find app -maxdepth 6 -type f | sort
-          else
-            echo "::error::app directory does not exist"
+          if [ -z "${KOTLINC}" ]; then
+            echo "::error::kotlinc executable was not found"
+            echo "Archive contents:"
+            find kotlin-dist -maxdepth 4 -type f | sort
             exit 1
           fi
 
-          echo "=== Kotlin sources ==="
+          KOTLIN_BIN="$(dirname "${KOTLINC}")"
 
-          find app/src/main \
-            -type f \
-            -name "*.kt" \
-            -print \
-            | sort || true
+          echo "Kotlin compiler: ${KOTLINC}"
+          echo "Kotlin bin: ${KOTLIN_BIN}"
 
-          echo "=== Java sources ==="
+          chmod +x "${KOTLINC}"
 
-          find app/src/main \
-            -type f \
-            -name "*.java" \
-            -print \
-            | sort || true
+          echo "${KOTLIN_BIN}" >> "${GITHUB_PATH}"
+
+          "${KOTLINC}" -version
 
       - name: Prepare build directories
         shell: bash
@@ -147,23 +135,23 @@ jobs:
         run: |
           set -euxo pipefail
 
-          SOURCE_MANIFEST="app/src/main/AndroidManifest.xml"
-          NATIVE_MANIFEST="native-build/AndroidManifest.xml"
-
-          test -f "${SOURCE_MANIFEST}"
-
-          python3 - "${SOURCE_MANIFEST}" "${NATIVE_MANIFEST}" "${PACKAGE_NAME}" <<'PY'
+          python3 - "${PACKAGE_NAME}" <<'PY'
           from pathlib import Path
           import re
           import sys
 
-          source = Path(sys.argv[1])
-          target = Path(sys.argv[2])
-          package_name = sys.argv[3]
+          package_name = sys.argv[1]
+
+          source = Path("app/src/main/AndroidManifest.xml")
+          target = Path("native-build/AndroidManifest.xml")
+
+          if not source.is_file():
+              raise SystemExit(
+                  "app/src/main/AndroidManifest.xml was not found"
+              )
 
           text = source.read_text(encoding="utf-8")
 
-          # Remove an existing package attribute from the source copy.
           text = re.sub(
               r'\s+package\s*=\s*"[^"]*"',
               "",
@@ -171,7 +159,6 @@ jobs:
               count=1,
           )
 
-          # Add the package required by the direct AAPT2 build.
           text = re.sub(
               r"<manifest\b",
               f'<manifest package="{package_name}"',
@@ -184,7 +171,7 @@ jobs:
 
           grep -q \
             "package=\"${PACKAGE_NAME}\"" \
-            "${NATIVE_MANIFEST}"
+            native-build/AndroidManifest.xml
 
       - name: Compile Android resources
         shell: bash
@@ -193,23 +180,22 @@ jobs:
 
           AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
 
-          test -d app/src/main/res
+          if [ ! -d app/src/main/res ]; then
+            echo "::error::app/src/main/res does not exist"
+            exit 1
+          fi
 
           find app/src/main/res \
             -type f \
             -print0 |
           while IFS= read -r -d '' resource; do
-            echo "AAPT2 compiling: ${resource}"
+            echo "Compiling: ${resource}"
 
             "${AAPT2}" compile \
               --legacy \
               -o native-build/compiled-res \
               "${resource}"
           done
-
-          find native-build/compiled-res \
-            -type f \
-            -print
 
       - name: Link Android resources
         shell: bash
@@ -219,11 +205,13 @@ jobs:
           AAPT2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
           ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
 
-          FLAT_FILES=(
-            native-build/compiled-res/*.flat
+          mapfile -t FLAT_FILES < <(
+            find native-build/compiled-res \
+              -type f \
+              -name "*.flat"
           )
 
-          test -e "${FLAT_FILES[0]}"
+          test "${#FLAT_FILES[@]}" -gt 0
 
           "${AAPT2}" link \
             -o native-build/resources.apk \
@@ -246,55 +234,40 @@ jobs:
             -print \
             > native-build/kotlin-sources.txt
 
-          echo "Kotlin source files:"
+          echo "Kotlin sources:"
           cat native-build/kotlin-sources.txt
 
           test -s native-build/kotlin-sources.txt
 
-      - name: Discover generated Java sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          find native-build/generated \
-            -type f \
-            -name "*.java" \
-            -print \
-            > native-build/generated-java-sources.txt
-
-          echo "Generated Java sources:"
-
-          if [ -s native-build/generated-java-sources.txt ]; then
-            cat native-build/generated-java-sources.txt
-          else
-            echo "None"
-          fi
-
-      - name: Compile generated Android Java
+      - name: Compile generated Java sources
         shell: bash
         run: |
           set -euxo pipefail
 
           ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
 
-          if [ -s native-build/generated-java-sources.txt ]; then
+          find native-build/generated \
+            -type f \
+            -name "*.java" \
+            -print \
+            > native-build/generated-java.txt
+
+          if [ -s native-build/generated-java.txt ]; then
             javac \
               -source 17 \
               -target 17 \
               -encoding UTF-8 \
               -classpath "${ANDROID_JAR}" \
               -d native-build/classes \
-              @native-build/generated-java-sources.txt
+              @native-build/generated-java.txt
           fi
 
-      - name: Compile Kotlin
+      - name: Compile Kotlin sources
         shell: bash
         run: |
           set -euxo pipefail
 
           ANDROID_JAR="${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-
-          test -f "${ANDROID_JAR}"
 
           kotlinc \
             -jvm-target 17 \
@@ -302,19 +275,6 @@ jobs:
               "${ANDROID_JAR}:native-build/classes" \
             -d native-build/classes \
             @native-build/kotlin-sources.txt
-
-      - name: Show compiled classes
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          find native-build/classes \
-            -type f \
-            -name "*.class" \
-            -print \
-            | sort
-
-          test -n "$(find native-build/classes -type f -name '*.class' -print -quit)"
 
       - name: Convert classes to DEX
         shell: bash
@@ -390,8 +350,6 @@ jobs:
             -keysize 2048 \
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
-
-          test -f native-build/debug.keystore
 
       - name: Sign APK
         shell: bash
