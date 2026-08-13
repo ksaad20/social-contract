@@ -11,13 +11,8 @@ permissions:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build CropShare Debug APK
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_API: "35"
-      BUILD_TOOLS: "35.0.0"
-      JAVA_VERSION: "17"
 
     steps:
       - name: Checkout
@@ -32,52 +27,15 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -euxo pipefail
 
           sdkmanager \
             "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;${BUILD_TOOLS}"
-
-      - name: Verify Android SDK
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          test -f "${ANDROID_HOME}/platforms/android-${ANDROID_API}/android.jar"
-          test -x "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/aapt2"
-          test -x "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/d8"
-          test -x "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
-          test -x "${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
-
-          java -version
-
-      # ---------------------------------------------------------------
-      # Use the project's Gradle build.
-      #
-      # This is intentionally NOT using:
-      #   - Maven
-      #   - manual Kotlin compilation
-      #   - manual Compose compiler invocation
-      #   - manual AAPT2 linking
-      #   - manually assembled APKs
-      #
-      # Gradle + Android Gradle Plugin correctly resolve:
-      #   Kotlin
-      #   AndroidX
-      #   Compose
-      #   Material3
-      #   Compose compiler
-      #   transitive dependencies
-      #   AAR libraries
-      #   resources
-      #   DEX
-      #   manifest merging
-      #   APK signing
-      # ---------------------------------------------------------------
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v6
@@ -85,38 +43,73 @@ jobs:
           gradle-version: "8.13"
           validate-wrappers: false
 
-      - name: Verify Gradle
+      - name: Verify project structure
         shell: bash
         run: |
           set -euxo pipefail
 
-          gradle --version
+          echo "Repository root:"
+          pwd
 
-      # ---------------------------------------------------------------
-      # AndroidManifest.xml must NOT contain a package= attribute.
-      #
-      # Modern Android Gradle Plugin uses namespace from
-      # app/build.gradle.kts instead.
-      #
-      # This only modifies the CI checkout; it does not modify Git.
-      # ---------------------------------------------------------------
+          echo "Top-level files:"
+          ls -la
 
-      - name: Normalize Android manifest
+          test -f app/src/main/AndroidManifest.xml
+
+          if [ -f settings.gradle.kts ]; then
+            echo "settings.gradle.kts found"
+          elif [ -f settings.gradle ]; then
+            echo "settings.gradle found"
+          else
+            echo "::error::No settings.gradle.kts or settings.gradle found."
+            exit 1
+          fi
+
+          if [ -f app/build.gradle.kts ]; then
+            echo "app/build.gradle.kts found"
+          elif [ -f app/build.gradle ]; then
+            echo "app/build.gradle found"
+          else
+            echo "::error::No app Gradle build file found."
+            exit 1
+          fi
+
+      - name: Verify Kotlin source
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Kotlin source files:"
+
+          find app/src/main \
+            -type f \
+            -name "*.kt" \
+            -print \
+            | sort
+
+          test -n "$(
+            find app/src/main \
+              -type f \
+              -name "*.kt" \
+              -print \
+              -quit
+          )"
+
+      - name: Remove manifest package attribute
         shell: bash
         run: |
           set -euxo pipefail
 
           MANIFEST="app/src/main/AndroidManifest.xml"
 
-          test -f "${MANIFEST}"
-
           python3 - "${MANIFEST}" <<'PY'
           from pathlib import Path
           import re
           import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          manifest = Path(sys.argv[1])
+
+          text = manifest.read_text(encoding="utf-8")
 
           updated = re.sub(
               r'\s+package\s*=\s*"[^"]*"',
@@ -125,206 +118,110 @@ jobs:
               count=1,
           )
 
-          path.write_text(updated, encoding="utf-8")
+          if updated != text:
+              manifest.write_text(updated, encoding="utf-8")
+              print("Removed package attribute from AndroidManifest.xml")
+          else:
+              print("No package attribute found")
+
+          if re.search(
+              r"<manifest\b[^>]*\bpackage\s*=",
+              updated,
+          ):
+              raise SystemExit(
+                  "ERROR: package attribute is still present "
+                  "in AndroidManifest.xml"
+              )
           PY
 
-          if grep -Eq '<manifest[^>]*[[:space:]]package[[:space:]]*=' "${MANIFEST}"; then
-            echo "::error::AndroidManifest.xml still contains package="
-            exit 1
-          fi
-
-          echo "AndroidManifest.xml is compatible with modern AGP."
-
-      # ---------------------------------------------------------------
-      # Verify that this is actually a Kotlin Android project.
-      # ---------------------------------------------------------------
-
-      - name: Verify Kotlin Android project
+      - name: Verify Gradle namespace
         shell: bash
         run: |
           set -euxo pipefail
-
-          test -f settings.gradle.kts || \
-            test -f settings.gradle
-
-          test -f build.gradle.kts || \
-            test -f build.gradle
-
-          test -f app/build.gradle.kts || \
-            test -f app/build.gradle
-
-          test -d app/src/main
-
-          echo "Project structure:"
-          find app/src/main -maxdepth 4 -type f | sort
-
-      # ---------------------------------------------------------------
-      # Verify the Kotlin source tree.
-      # ---------------------------------------------------------------
-
-      - name: Verify Kotlin sources
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mapfile -t KOTLIN_FILES < <(
-            find app/src/main \
-              -type f \
-              -name "*.kt" \
-              -print
-          )
-
-          test "${#KOTLIN_FILES[@]}" -gt 0
-
-          echo "Kotlin production sources:"
-          printf '%s\n' "${KOTLIN_FILES[@]}"
-
-      # ---------------------------------------------------------------
-      # Check that MainActivity exists and inspect its package.
-      # ---------------------------------------------------------------
-
-      - name: Verify MainActivity
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mapfile -t ACTIVITIES < <(
-            find app/src/main \
-              -type f \
-              \( \
-                -name "MainActivity.kt" \
-                -o \
-                -name "MainActivity.java" \
-              \) \
-              -print
-          )
-
-          if [ "${#ACTIVITIES[@]}" -eq 0 ]; then
-            echo "::error::MainActivity source file was not found."
-            exit 1
-          fi
-
-          echo "MainActivity source:"
-          printf '%s\n' "${ACTIVITIES[@]}"
-
-          for file in "${ACTIVITIES[@]}"; do
-            echo "----- ${file} -----"
-            sed -n '1,80p' "${file}"
-          done
-
-      # ---------------------------------------------------------------
-      # Print the Android namespace/application ID configuration.
-      # This makes namespace/package mistakes immediately visible.
-      # ---------------------------------------------------------------
-
-      - name: Inspect Gradle Android configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "===== app/build.gradle.kts ====="
 
           if [ -f app/build.gradle.kts ]; then
-            sed -n '1,240p' app/build.gradle.kts
+            BUILD_FILE="app/build.gradle.kts"
           else
-            sed -n '1,240p' app/build.gradle
+            BUILD_FILE="app/build.gradle"
           fi
 
-          echo "===== settings ====="
+          echo "Using: ${BUILD_FILE}"
 
-          if [ -f settings.gradle.kts ]; then
-            sed -n '1,200p' settings.gradle.kts
-          else
-            sed -n '1,200p' settings.gradle
+          grep -n "namespace" "${BUILD_FILE}"
+
+          if ! grep -Eq \
+            '^[[:space:]]*namespace[[:space:]]*=' \
+            "${BUILD_FILE}"; then
+
+            echo "::error::Android namespace is missing."
+            echo "::error::Add namespace to ${BUILD_FILE}."
+            exit 1
           fi
 
-      # ---------------------------------------------------------------
-      # Resolve dependencies using Gradle.
-      #
-      # This is the important replacement for the failing Maven step.
-      # ---------------------------------------------------------------
-
-      - name: Resolve Gradle dependencies
+      - name: Verify Gradle
         shell: bash
         run: |
           set -euxo pipefail
 
-          gradle \
-            :app:dependencies \
-            --configuration debugRuntimeClasspath \
-            --no-daemon
+          gradle --version
 
-      # ---------------------------------------------------------------
-      # Build the actual Android APK.
-      # ---------------------------------------------------------------
+      - name: Clean project
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf native-build
+
+          gradle clean \
+            --no-daemon \
+            --stacktrace
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -euxo pipefail
 
-          gradle \
-            :app:assembleDebug \
+          gradle :app:assembleDebug \
             --no-daemon \
             --stacktrace
-
-      # ---------------------------------------------------------------
-      # Locate generated APK.
-      # ---------------------------------------------------------------
 
       - name: Locate APK
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Generated APK files:"
+          echo "APK files:"
 
           find app/build/outputs/apk \
             -type f \
             -name "*.apk" \
-            -print
+            -print \
+            | sort
 
-          test -n "$(
-            find app/build/outputs/apk \
-              -type f \
-              -name "*.apk" \
-              -print \
-              -quit
-          )"
+          test -f \
+            app/build/outputs/apk/debug/app-debug.apk
 
-      # ---------------------------------------------------------------
-      # Verify APK with Android's official signing tool.
-      # ---------------------------------------------------------------
+          test -s \
+            app/build/outputs/apk/debug/app-debug.apk
 
       - name: Verify APK
         shell: bash
         run: |
           set -euxo pipefail
 
-          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          mapfile -t APKS < <(
-            find app/build/outputs/apk \
-              -type f \
-              -name "*.apk" \
-              -print
-          )
+          APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
 
-          test "${#APKS[@]}" -gt 0
+          "${APKSIGNER}" verify \
+            --verbose \
+            "${APK}"
 
-          for apk in "${APKS[@]}"; do
-            echo "===== ${apk} ====="
-            "${APKSIGNER}" verify --verbose "${apk}"
-            ls -lh "${apk}"
-          done
-
-      # ---------------------------------------------------------------
-      # Upload APK.
-      # ---------------------------------------------------------------
+          ls -lh "${APK}"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
           name: cropshare-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
