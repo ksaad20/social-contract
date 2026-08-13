@@ -23,7 +23,19 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v6
@@ -31,7 +43,7 @@ jobs:
           gradle-version: "8.13"
           validate-wrappers: false
 
-      - name: Verify toolchain
+      - name: Verify build environment
         shell: bash
         run: |
           set -euo pipefail
@@ -39,26 +51,47 @@ jobs:
           java -version
           gradle --version
 
-      - name: Verify Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
           test -f settings.gradle.kts
           test -f app/build.gradle.kts
           test -f app/src/main/AndroidManifest.xml
 
-          echo "Project files:"
-          find app/src/main -maxdepth 3 -type f | sort
-
-      - name: Verify Kotlin sources
+      - name: Verify AndroidManifest
         shell: bash
         run: |
           set -euo pipefail
 
-          test -n "$(find app/src/main -type f -name '*.kt' -print -quit)"
+          MANIFEST="app/src/main/AndroidManifest.xml"
+
+          if grep -qE '<manifest[^>]*[[:space:]]package[[:space:]]*=' "${MANIFEST}"; then
+            echo "::error::AndroidManifest.xml must not contain a package attribute with the current Android Gradle Plugin."
+            echo "Define the namespace in app/build.gradle.kts instead."
+            exit 1
+          fi
+
+          echo "AndroidManifest.xml is valid for the current Android Gradle Plugin."
+
+      - name: Verify Android namespace and application ID
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_FILE="app/build.gradle.kts"
+
+          grep -Eq 'namespace[[:space:]]*=[[:space:]]*"com\.example\.socialcontract"' \
+            "${BUILD_FILE}"
+
+          grep -Eq 'applicationId[[:space:]]*=[[:space:]]*"com\.example\.socialcontract"' \
+            "${BUILD_FILE}"
+
+          echo "Namespace and applicationId verified."
+
+      - name: Show production Kotlin sources
+        shell: bash
+        run: |
+          set -euo pipefail
 
           echo "Production Kotlin sources:"
+
           find app/src/main \
             -type f \
             -name "*.kt" \
@@ -67,22 +100,7 @@ jobs:
             -print \
             | sort
 
-      - name: Verify manifest namespace
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MANIFEST="app/src/main/AndroidManifest.xml"
-
-          if grep -qE '<manifest[^>]*[[:space:]]package=' "${MANIFEST}"; then
-            echo "::error::AndroidManifest.xml contains a package attribute."
-            echo "The namespace must be defined in app/build.gradle.kts."
-            exit 1
-          fi
-
-          echo "Manifest is compatible with modern Android Gradle Plugin."
-
-      - name: Clean previous build
+      - name: Clean build
         shell: bash
         run: |
           set -euo pipefail
@@ -97,32 +115,20 @@ jobs:
           gradle \
             :app:assembleDebug \
             --no-daemon \
-            --stacktrace
+            --stacktrace \
+            --warning-mode all
 
       - name: Locate APK
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Generated APK files:"
+          echo "APK files:"
 
           find app/build/outputs/apk \
             -type f \
             -name "*.apk" \
             -print
-
-          test -n "$(
-            find app/build/outputs/apk \
-              -type f \
-              -name "*.apk" \
-              -print \
-              -quit
-          )"
-
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -euo pipefail
 
           APK="$(
             find app/build/outputs/apk \
@@ -132,27 +138,36 @@ jobs:
               -quit
           )"
 
+          test -n "${APK}"
           test -s "${APK}"
 
-          echo "APK:"
-          ls -lh "${APK}"
+          echo "APK_PATH=${APK}" >> "${GITHUB_ENV}"
 
-          SDK="${ANDROID_HOME}"
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
           APKSIGNER="$(
-            find "${SDK}/build-tools" \
+            find "${ANDROID_HOME}/build-tools" \
               -type f \
-              -name apksigner \
+              -name "apksigner" \
+              -print \
               | sort \
               | tail -n 1
           )"
 
           test -x "${APKSIGNER}"
 
-          "${APKSIGNER}" verify --verbose "${APK}"
+          "${APKSIGNER}" verify \
+            --verbose \
+            "${APK_PATH}"
+
+          ls -lh "${APK_PATH}"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v5
         with:
           name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
