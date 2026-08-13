@@ -1,4 +1,3 @@
-```kotlin id="7v5q2c"
 package com.socialcontract.android.calculation
 
 import org.junit.Assert.assertEquals
@@ -151,5 +150,3 @@ class SettlementCalculatorTest {
         )
     }
 }
-```
-
