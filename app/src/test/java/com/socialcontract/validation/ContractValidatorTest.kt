@@ -1,4 +1,3 @@
-```kotlin
 package com.socialcontract.android.validation
 
 import org.junit.Assert.assertFalse
@@ -189,5 +188,3 @@ class ContractValidatorTest {
         assertFalse(result)
     }
 }
-```
-
