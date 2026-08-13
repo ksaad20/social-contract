@@ -1,4 +1,3 @@
-```kotlin
 package com.socialcontract.android.domain
 
 import org.junit.Assert.assertEquals
@@ -318,5 +317,3 @@ class ContractTest {
         assertFalse(statuses.isEmpty())
     }
 }
-```
-
